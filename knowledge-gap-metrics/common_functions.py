@@ -5,6 +5,7 @@ import pyspark
 import pyspark.sql
 import pyspark.sql.functions as F
 import pyspark.sql.types as T
+from pyspark.sql import Window
 
 
 def get_page_dataframe(monthly_snapshot, target_wikis):
@@ -42,6 +43,44 @@ def get_wikipedia_page_from_wikidata(df, snapshot, target_wikis):
     return output_df
 
 
+def number_of_wikipedia_pages(monthly_snapshot, target_wikis):
+    """
+    returns a dataframe with schema of
+        |-- wiki_db: string (nullable = true)
+        |-- year: string (nullable = true)
+        |-- month: string (nullable = true)
+        |-- article_count: long (nullable = false)
+        |-- cumsum: long (nullable = true)
+   
+    * `article_count`: number of artcicle created in the period of `year` and `month` in `wiki_db`
+    * `cumsum`: cumulative sum of `article_count`
+    """
+    query = """
+        SELECT p.wiki_db, p.page_id, mp.page_first_edit_timestamp 
+        FROM wmf_raw.mediawiki_page p
+        LEFT JOIN wmf.mediawiki_page_history mp
+        ON p.page_id=mp.page_id
+            AND P.wiki_db=mp.wiki_db
+        WHERE p.snapshot='"""+monthly_snapshot+"""'
+            AND p.wiki_db in (\""""+target_wikis.replace(' ', '\",\"')+"""\")
+            AND p.page_namespace=0
+            AND p.page_is_redirect=0
+            AND mp.snapshot='"""+monthly_snapshot+"""'
+            AND mp.wiki_db in (\""""+target_wikis.replace(' ', '\",\"')+"""\")
+        """
+    df = spark.sql(query).dropDuplicates()
+    df = (df
+        .where(F.col('page_first_edit_timestamp').isNotNull())
+        .withColumn('year', F.substring('page_first_edit_timestamp', 1, 4))
+        .withColumn('month', F.substring('page_first_edit_timestamp', 6, 2))
+        .groupby('wiki_db','year','month').count()
+        .withColumnRenamed('count', 'article_count')
+        .withColumn('cumsum', (F.sum('article_count')
+                                .over(Window.partitionBy('wiki_db')
+                                .orderBy('year', 'month')))))
+    return df
+
+
 ### Methods for extracting page properties ###
 def append_page_first_edit_timestamp(df, monthly_snapshot):
     """
@@ -68,3 +107,4 @@ def append_page_first_edit_timestamp(df, monthly_snapshot):
     # (move, create, rename, etc) in the page history
     output_df = spark.sql(query).dropDuplicates()
     return output_df
+
